@@ -1,0 +1,112 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() { return request.auth != null; }
+    function isOwner() { return signedIn() && request.auth.token.email == 'giri200211@gmail.com'; }
+    function me(uid) { return get(/databases/$(database)/documents/users/$(uid)).data; }
+    function active(uid) { return me(uid).status == 'active' && me(uid).expMs > request.time.toMillis(); }
+    function codeAfter(c) { return getAfter(/databases/$(database)/documents/codes/$(c)).data; }
+    function changed() { return request.resource.data.diff(resource.data).affectedKeys(); }
+    function str(v, max) { return v is string && v.size() <= max; }
+    function planOk(k) { return k in ['proj', 'm1', 'm3', 'pm1', 'p6', 'p12']; }
+    // The price of each plan. Keep this the same as the plan list in index.html.
+    function planPrice(k, intro) {
+      return k == 'proj' ? 349 : k == 'm1' ? (intro ? 299 : 499) : k == 'm3' ? 1299 : k == 'pm1' ? 799 : k == 'p6' ? 3499 : 5999;
+    }
+    function couponPrice(c, list) {
+      return c.kind == 'free' ? 0 : c.kind == 'pct' ? math.round(list * (100 - c.value) / 100.0) : math.max(0, list - c.value);
+    }
+    function couponOk(d) {
+      let c = get(/databases/$(database)/documents/codes/$(d.fwCode)).data;
+      return c.type == 'FW' && c.used == false && c.expMs > request.time.toMillis() && c.get('forUid', null) == null
+        && d.listPrice == planPrice(d.planKey, d.intro) && d.price == couponPrice(c, d.listPrice);
+    }
+
+    match /users/{uid} {
+      allow read: if isOwner() || (signedIn() && request.auth.uid == uid);
+
+      // Sign-up: only these fields, correct email, pending status and the correct price.
+      allow create: if signedIn() && request.auth.uid == uid
+        && request.resource.data.keys().hasOnly(['name','company','phone','email','planKey','plan','price','status','expMs','termsV','termsAt','createdAt','qCount','intro','fwCode','fwDesc','listPrice','fwBad'])
+        && request.resource.data.status == 'pending' && request.resource.data.expMs == 0 && request.resource.data.qCount == 0
+        && str(request.resource.data.name, 80) && request.resource.data.name.size() > 0
+        && str(request.resource.data.company, 120) && str(request.resource.data.phone, 20)
+        && request.resource.data.email == request.auth.token.email
+        && planOk(request.resource.data.planKey) && str(request.resource.data.plan, 40)
+        && request.resource.data.intro is bool && (request.resource.data.intro == false || request.resource.data.planKey == 'm1')
+        && request.resource.data.price is int
+        && (('fwCode' in request.resource.data) ? couponOk(request.resource.data)
+            : request.resource.data.price == planPrice(request.resource.data.planKey, request.resource.data.intro));
+
+      // The owner can change anything.
+      allow update: if isOwner();
+
+      // Client: usage counters, renewal request and watermark request, with limits.
+      allow update: if signedIn() && request.auth.uid == uid
+        && changed().hasOnly(['reqPlan','reqAt','qCount','qIds','lastSeen','wmReq'])
+        && (!('qCount' in changed()) || (request.resource.data.qCount is int && request.resource.data.qCount >= 0 && request.resource.data.qCount <= 5000))
+        && (!('qIds' in changed()) || (request.resource.data.qIds is list && request.resource.data.qIds.size() <= 5000))
+        && (!('reqPlan' in changed()) || request.resource.data.reqPlan == null || planOk(request.resource.data.reqPlan))
+        && (!('wmReq' in changed()) || request.resource.data.wmReq == null || request.resource.data.wmReq.days in [30, 365]);
+
+      // Client: mark the email as confirmed (only when Firebase says it is confirmed).
+      allow update: if signedIn() && request.auth.uid == uid && changed().hasOnly(['emailVerified'])
+        && request.resource.data.emailVerified == true && request.auth.token.email_verified == true;
+
+      // Client: watermark removal code.
+      allow update: if signedIn() && request.auth.uid == uid && changed().hasOnly(['wmUntil','wmCode'])
+        && codeAfter(request.resource.data.wmCode).usedBy == request.auth.uid && codeAfter(request.resource.data.wmCode).type == 'WM'
+        && request.resource.data.wmUntil <= request.time.toMillis() + codeAfter(request.resource.data.wmCode).days * 86400000 + 60000
+           + (resource.data.get('wmUntil', 0) > request.time.toMillis() ? resource.data.get('wmUntil', 0) - request.time.toMillis() : 0);
+
+      // Client: payment transaction ID (UTR). 12 digits, used only once, email confirmed for new accounts.
+      allow update: if signedIn() && request.auth.uid == uid
+        && changed().hasOnly(['utr','utrAt','utrFor','utrAmt','reqPlan','reqAt','wmReq','lastSeen'])
+        && changed().hasAll(['utr','utrAt'])
+        && request.resource.data.utr is string && request.resource.data.utr.matches('^[0-9]{12}$')
+        && request.resource.data.utrFor in ['signup','renew','wm']
+        && request.resource.data.utrAmt is int && request.resource.data.utrAmt >= 0 && request.resource.data.utrAmt <= 20000
+        && (request.resource.data.utrFor != 'signup' || request.auth.token.email_verified == true)
+        && (request.resource.data.get('reqPlan', null) == null || planOk(request.resource.data.reqPlan))
+        && !exists(/databases/$(database)/documents/utrs/$(request.resource.data.utr))
+        && getAfter(/databases/$(database)/documents/utrs/$(request.resource.data.utr)).data.uid == request.auth.uid;
+
+      allow delete: if isOwner();
+
+      // Saved quotations and settings: only the client, only while the plan is active, only these two folders.
+      match /{sub}/{docId} {
+        allow read: if signedIn() && request.auth.uid == uid && active(uid) && sub in ['quotes','meta'];
+        allow create, update: if signedIn() && request.auth.uid == uid && active(uid) && sub in ['quotes','meta']
+          && request.resource.data.keys().hasOnly(['json','ts'])
+          && request.resource.data.json is string && request.resource.data.json.size() < 1000000
+          && request.resource.data.ts is int;
+        allow delete: if isOwner() || (signedIn() && request.auth.uid == uid && active(uid));
+      }
+    }
+
+    // One record per payment transaction ID, so the same ID cannot be used twice.
+    match /utrs/{id} {
+      allow create: if signedIn() && id.matches('^[0-9]{12}$')
+        && request.resource.data.keys().hasOnly(['uid','at','for','amt'])
+        && request.resource.data.uid == request.auth.uid && request.resource.data.at is int
+        && request.resource.data['for'] in ['signup','renew','wm'] && request.resource.data.amt is int;
+      allow read, delete: if isOwner();
+    }
+
+    match /codes/{code} {
+      allow get: if signedIn();
+      allow list, create, delete: if isOwner();
+      allow update: if isOwner() || (signedIn() && resource.data.used == false && request.resource.data.used == true
+        && request.resource.data.usedBy == request.auth.uid
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['used','usedBy','usedAt'])
+        && resource.data.expMs > request.time.toMillis());
+    }
+
+    match /designs/{id} {
+      allow read: if isOwner() || resource.data.demo == true || (signedIn() && active(request.auth.uid));
+      allow write: if isOwner();
+    }
+
+    // Everything else is closed.
+  }
+}
