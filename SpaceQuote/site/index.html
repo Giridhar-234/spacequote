@@ -3351,6 +3351,6 @@ else if(a==='wmon')u={wmUntil:Math.max(now,x.wmUntil||0)+wd*864e5,wmReq:null};el
 else if(a==='utrok')u={utrDone:x.utr};else if(a==='wmoff')u={wmUntil:0};
 else if(a==='purge'){if(!confirm('Delete all saved data of '+x.name+'? This cannot be undone.'))return;await purge(x);window.render();return}
 if(u){await updateDoc(doc(db,'users',id),u);Object.assign(x,u);window.render()}}catch(er){console.warn(er);alert('The change could not be saved. Please check your internet connection and the security rules.')}});
-if(a==='grant'||a==='extend'){const base=a==='extend'&&x.expMs>now?x.expMs:now,exp=base+P.days*864e5,fg=a==='grant'&&!x.approvedAt;u={status:'active',planKey:P.k,plan:P.n,price:fg&&P.k===x.planKey?x.price:P.price,expMs:exp,delMs:exp+(fg&&x.intro&&P.intro?P.introRet:P.ret)*864e5,approvedAt:now,reqPlan:null,reqAt:null,purged:false};if(P.wm)u.wmUntil=Math.max(exp,x.wmUntil||0);if(x.utr)u.utrDone=x.utr;if(a==='grant'&&x.fwCode&&!x.fwUsed){await updateDoc(doc(db,'codes',x.fwCode),{used:true,usedBy:id,usedAt:now});u.fwUsed=true}}
+
 </script>
 </body></html>
